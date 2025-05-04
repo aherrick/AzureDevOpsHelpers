@@ -1,3 +1,5 @@
+![dotnet](https://github.com/aherrick/SemanticKernelFun/actions/workflows/dotnet.yml/badge.svg)
+
 # Azure DevOps Helper
 
 A DevOps utility for working with Azure DevOps.
