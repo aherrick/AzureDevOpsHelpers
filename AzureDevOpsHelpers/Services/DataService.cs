@@ -163,6 +163,7 @@ public class DataService(string org, string pat)
     public async Task GetDiffForPullRequest(string project, string repoName, int pullRequestId)
     {
         var prDto = await GetPullRequestChanges(project, repoName, pullRequestId);
+        StringBuilder diffBuilder = new StringBuilder();
 
         foreach (var change in prDto.Changes)
         {
@@ -395,6 +396,118 @@ public class DataService(string org, string pat)
         }
 
         return filleUnifiedDiffDtos;
+    }
+
+    public async Task<List<PullRequest>> GetOpenPullRequests(string projectName)
+    {
+        var client = new HttpClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Basic",
+            Convert.ToBase64String(Encoding.ASCII.GetBytes($":{pat}"))
+        );
+        client.DefaultRequestHeaders.Accept.Add(
+            new MediaTypeWithQualityHeaderValue("application/json")
+        );
+
+        var pullRequests = new List<PullRequest>();
+
+        // Get project ID
+        string projectsUrl = $"https://dev.azure.com/{org}/_apis/projects?api-version=7.0";
+        var projectsJson = await GET(projectsUrl);
+        var projects = JsonSerializer.Deserialize<JsonElement>(projectsJson).GetProperty("value");
+
+        string projectId = null;
+        foreach (var project in projects.EnumerateArray())
+        {
+            if (
+                project
+                    .GetProperty("name")
+                    .GetString()
+                    .Equals(projectName, StringComparison.OrdinalIgnoreCase)
+            )
+            {
+                projectId = project.GetProperty("id").GetString();
+                break;
+            }
+        }
+
+        if (projectId == null)
+        {
+            Console.WriteLine($"Project '{projectName}' not found.");
+            return pullRequests;
+        }
+
+        // Get repositories
+        string reposUrl =
+            $"https://dev.azure.com/{org}/{projectId}/_apis/git/repositories?api-version=7.0";
+        var reposJson = await GET(reposUrl);
+        var repos = JsonSerializer.Deserialize<JsonElement>(reposJson).GetProperty("value");
+
+        foreach (var repo in repos.EnumerateArray())
+        {
+            string repoId = repo.GetProperty("id").GetString();
+            string repoName = repo.GetProperty("name").GetString();
+
+            // Get open pull requests
+            string prUrl =
+                $"https://dev.azure.com/{org}/{projectId}/_apis/git/repositories/{repoId}/pullrequests?searchCriteria.status=active&api-version=7.0";
+            var prJson = await GET(prUrl);
+            var prs = JsonSerializer.Deserialize<JsonElement>(prJson).GetProperty("value");
+
+            foreach (var pr in prs.EnumerateArray())
+            {
+                int prId = pr.GetProperty("pullRequestId").GetInt32();
+                string title = pr.GetProperty("title").GetString();
+                string description = pr.TryGetProperty("description", out var desc)
+                    ? desc.GetString()
+                    : "No description provided";
+                string status = pr.GetProperty("status").GetString();
+
+                // Get reviewers
+                string reviewersUrl =
+                    $"https://dev.azure.com/{org}/{projectId}/_apis/git/repositories/{repoId}/pullrequests/{prId}/reviewers?api-version=7.0";
+                var reviewersJson = await GET(reviewersUrl);
+                var reviewers = JsonSerializer
+                    .Deserialize<JsonElement>(reviewersJson)
+                    .GetProperty("value");
+
+                var approvedReviewers = new List<string>();
+                foreach (var reviewer in reviewers.EnumerateArray())
+                {
+                    if (reviewer.GetProperty("vote").GetInt32() == 10)
+                    {
+                        approvedReviewers.Add(reviewer.GetProperty("displayName").GetString());
+                    }
+                }
+
+                Console.WriteLine("-------------------------");
+
+                // Output PR details
+                Console.WriteLine($"Project: {projectName}");
+                Console.WriteLine($"Repository: {repoName}");
+                Console.WriteLine($"PR #{prId}: {title}");
+                Console.WriteLine($"Description: {description}");
+                Console.WriteLine($"Status: {status}");
+                Console.WriteLine(
+                    $"Approved By: {(approvedReviewers.Count > 0 ? string.Join(", ", approvedReviewers) : "None")}"
+                );
+
+                pullRequests.Add(
+                    new PullRequest
+                    {
+                        Id = prId,
+                        Title = title,
+                        Description = description,
+                        Status = status,
+                        ProjectName = projectName,
+                        RepositoryName = repoName,
+                        ApprovedReviewers = approvedReviewers,
+                    }
+                );
+            }
+        }
+
+        return pullRequests;
     }
 
     private async Task<string> GET(string url)
