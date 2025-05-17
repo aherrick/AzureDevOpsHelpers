@@ -1,4 +1,4 @@
-﻿using System.Net.Http;
+﻿using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -6,6 +6,9 @@ using System.Web;
 using AzureDevOpsHelpers.Models;
 using DiffPlex.DiffBuilder;
 using DiffPlex.DiffBuilder.Model;
+using Microsoft.Extensions.Http;
+using Microsoft.SemanticKernel;
+using Polly;
 
 namespace AzureDevOpsHelpers.Services;
 
@@ -163,7 +166,7 @@ public class DataService(string org, string pat)
     public async Task GetDiffForPullRequest(string project, string repoName, int pullRequestId)
     {
         var prDto = await GetPullRequestChanges(project, repoName, pullRequestId);
-        StringBuilder diffBuilder = new StringBuilder();
+        StringBuilder diffBuilder = new();
 
         foreach (var change in prDto.Changes)
         {
@@ -398,16 +401,82 @@ public class DataService(string org, string pat)
         return filleUnifiedDiffDtos;
     }
 
-    public async Task<List<PullRequest>> GetOpenPullRequests(string projectName)
+    public async Task<List<PullRequest>> GetOpenPullRequests(
+        string projectName,
+        string azureAIEndpoint,
+        string azureAIAPIKey
+    )
     {
-        var client = new HttpClient();
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
-            "Basic",
-            Convert.ToBase64String(Encoding.ASCII.GetBytes($":{pat}"))
-        );
-        client.DefaultRequestHeaders.Accept.Add(
-            new MediaTypeWithQualityHeaderValue("application/json")
-        );
+        var prompt = """
+            You are an advanced Comment Analysis AI designed to process and summarize pull request comments.
+            Your task is to generate a concise summary (1–2 sentences, 15–40 words) capturing the main themes of all provided comments and determine if any comment indicates the pull request is on hold or dependent on another pull request, returning the result in a structured JSON object.
+            The input is a string with comments concatenated by newlines.
+
+            ### Requirements:
+            - Produce a clear, concise summary (1–2 sentences, 15–40 words) capturing only the core themes or points of all comments.
+            - Avoid vague language (e.g., "some reference", "etc.") and skip specific commands unless critical to the theme.
+            - Detect if any comment suggests the PR is on hold or dependent (e.g., "waiting for PR #123", "depends on PR", "blocked by PR", "on hold until").
+            - Respond with a JSON object only — no markdown, no code fences, no extra formatting or text.
+
+            ### Output Format:
+            {
+              "summary": "Clear and concise summary of all comments in 1–2 sentences",
+              "onHold": true | false
+            }
+
+            ### Constraints:
+            - Output must be a valid, raw RFC8259-compliant JSON object with no extra characters.
+            - Do not include any markdown, code fences (e.g., ```json), or explanation text.
+            - If no comment indicates the PR is on hold or dependent, set "onHold" to false.
+            - If no comments are provided, return:
+              {
+                "summary": "No user comments provided.",
+                "onHold": false
+              }
+
+            ### Input:
+            {{ $input }}
+            """;
+
+        var retryPolicy = Policy<HttpResponseMessage>
+            .Handle<HttpRequestException>()
+            .OrResult(r => r.StatusCode == HttpStatusCode.TooManyRequests)
+            .WaitAndRetryAsync(
+                retryCount: 5,
+                sleepDurationProvider: (retryAttempt, response, context) =>
+                {
+                    var retryAfter = response?.Result?.Headers?.RetryAfter?.Delta;
+                    if (retryAfter.HasValue)
+                    {
+                        return retryAfter.Value + TimeSpan.FromSeconds(1);
+                    }
+
+                    // fallback
+                    var jitter = TimeSpan.FromMilliseconds(Random.Shared.Next(0, 100));
+                    return TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)) + jitter;
+                },
+                onRetryAsync: (outcome, timespan, retryAttempt, context) =>
+                {
+                    Console.WriteLine($"Retry {retryAttempt} for {outcome.Result?.StatusCode}");
+                    return Task.CompletedTask;
+                }
+            );
+
+        var handler = new PolicyHttpMessageHandler(retryPolicy)
+        {
+            InnerHandler = new HttpClientHandler(),
+        };
+        var httpClient = new HttpClient(handler);
+
+        var kernel = Kernel
+            .CreateBuilder()
+            .AddAzureOpenAIChatCompletion(
+                deploymentName: "gpt-4o",
+                endpoint: azureAIEndpoint,
+                apiKey: azureAIAPIKey,
+                httpClient: httpClient
+            )
+            .Build();
 
         var pullRequests = new List<PullRequest>();
 
@@ -431,14 +500,8 @@ public class DataService(string org, string pat)
             }
         }
 
-        if (projectId == null)
-        {
-            Console.WriteLine($"Project '{projectName}' not found.");
-            return pullRequests;
-        }
-
         // Get repositories
-        string reposUrl =
+        var reposUrl =
             $"https://dev.azure.com/{org}/{projectId}/_apis/git/repositories?api-version=7.0";
         var reposJson = await GET(reposUrl);
         var repos = JsonSerializer.Deserialize<JsonElement>(reposJson).GetProperty("value");
@@ -449,22 +512,22 @@ public class DataService(string org, string pat)
             string repoName = repo.GetProperty("name").GetString();
 
             // Get open pull requests
-            string prUrl =
+            var prUrl =
                 $"https://dev.azure.com/{org}/{projectId}/_apis/git/repositories/{repoId}/pullrequests?searchCriteria.status=active&api-version=7.0";
             var prJson = await GET(prUrl);
             var prs = JsonSerializer.Deserialize<JsonElement>(prJson).GetProperty("value");
 
             foreach (var pr in prs.EnumerateArray())
             {
-                int prId = pr.GetProperty("pullRequestId").GetInt32();
-                string title = pr.GetProperty("title").GetString();
-                string description = pr.TryGetProperty("description", out var desc)
+                var prId = pr.GetProperty("pullRequestId").GetInt32();
+                var title = pr.GetProperty("title").GetString();
+                var description = pr.TryGetProperty("description", out var desc)
                     ? desc.GetString()
                     : "No description provided";
-                string status = pr.GetProperty("status").GetString();
+                var status = pr.GetProperty("status").GetString();
 
                 // Get reviewers
-                string reviewersUrl =
+                var reviewersUrl =
                     $"https://dev.azure.com/{org}/{projectId}/_apis/git/repositories/{repoId}/pullrequests/{prId}/reviewers?api-version=7.0";
                 var reviewersJson = await GET(reviewersUrl);
                 var reviewers = JsonSerializer
@@ -480,9 +543,59 @@ public class DataService(string org, string pat)
                     }
                 }
 
-                Console.WriteLine("-------------------------");
+                // Get PR comments
+                var commentsUrl =
+                    $"https://dev.azure.com/{org}/{projectId}/_apis/git/repositories/{repoId}/pullrequests/{prId}/threads?api-version=7.0";
+                var commentsJson = await GET(commentsUrl);
+                var threads = JsonSerializer
+                    .Deserialize<JsonElement>(commentsJson)
+                    .GetProperty("value");
+                var comments = new List<string>();
+                foreach (var thread in threads.EnumerateArray())
+                {
+                    if (thread.TryGetProperty("comments", out var threadComments))
+                    {
+                        foreach (var comment in threadComments.EnumerateArray())
+                        {
+                            if (
+                                comment.TryGetProperty("content", out var content)
+                                && comment.TryGetProperty("commentType", out var commentType)
+                                && commentType.GetString() != "system"
+                            )
+                            {
+                                string commentText = content.GetString();
+                                if (!string.IsNullOrEmpty(commentText))
+                                {
+                                    comments.Add(commentText);
+                                }
+                            }
+                        }
+                    }
+                }
 
-                // Output PR details
+                string summary;
+                bool onHold;
+
+                if (comments.Count == 0)
+                {
+                    summary = "No comments available.";
+                    onHold = false;
+                }
+                else
+                {
+                    var commentsInput = string.Join("\n", comments);
+                    var filledPrompt = prompt.Replace("{{ $input }}", commentsInput);
+
+                    var result = await kernel.InvokePromptAsync(filledPrompt);
+
+                    var commentAnalysis = JsonSerializer.Deserialize<JsonElement>(
+                        result.ToString()
+                    );
+                    summary = commentAnalysis.GetProperty("summary").GetString();
+                    onHold = commentAnalysis.GetProperty("onHold").GetBoolean();
+                }
+
+                Console.WriteLine("-------------------------");
                 Console.WriteLine($"Project: {projectName}");
                 Console.WriteLine($"Repository: {repoName}");
                 Console.WriteLine($"PR #{prId}: {title}");
@@ -491,6 +604,8 @@ public class DataService(string org, string pat)
                 Console.WriteLine(
                     $"Approved By: {(approvedReviewers.Count > 0 ? string.Join(", ", approvedReviewers) : "None")}"
                 );
+                Console.WriteLine($"Comment Summary: {summary}");
+                Console.WriteLine($"On Hold: {onHold}");
 
                 pullRequests.Add(
                     new PullRequest
