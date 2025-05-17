@@ -10,6 +10,7 @@ A DevOps utility for working with Azure DevOps.
 - Retrieves project entitlements for each user.
 - Exports user and project data to a CSV file.
 - Retrieve the unified diff of files for a specified pull request.
+- Retrieve Open Pull Requests.
 
 ## Usage
 
