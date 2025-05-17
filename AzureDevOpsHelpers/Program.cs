@@ -5,8 +5,4 @@ var config = new ConfigurationBuilder().AddUserSecrets<Program>().Build();
 
 var ds = new DataService(config["org"], config["pat"]);
 
-await ds.GetOpenPullRequests(
-    "Supply Chain Cloud",
-    config["azureAIEndpoint"],
-    config["azureAIAPIKey"]
-);
+await ds.GetOpenPullRequests("", config["azureAIEndpoint"], config["azureAIAPIKey"]);
