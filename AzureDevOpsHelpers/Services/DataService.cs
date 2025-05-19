@@ -407,7 +407,8 @@ public class DataService(string org, string pat)
     public async Task<List<PullRequest>> GetOpenPullRequests(
         string projectName,
         string azureAIEndpoint,
-        string azureAIAPIKey
+        string azureAIAPIKey,
+        string azureAIModel
     )
     {
         var prompt = """
@@ -443,7 +444,7 @@ public class DataService(string org, string pat)
 
         var httpClient = GetRetryHttpClient();
 
-        var kernel = GetSKChatCompletion(azureAIEndpoint, azureAIAPIKey, httpClient);
+        var kernel = GetSKChatCompletion(azureAIEndpoint, azureAIAPIKey, azureAIModel, httpClient);
 
         var pullRequests = new List<PullRequest>();
 
@@ -598,11 +599,12 @@ public class DataService(string org, string pat)
         string project,
         string repoName,
         string azureAIEndpoint,
-        string azureAIAPIKey
+        string azureAIAPIKey,
+        string azureAIModel
     )
     {
         var httpClient = GetRetryHttpClient();
-        var kernel = GetSKChatCompletion(azureAIEndpoint, azureAIAPIKey, httpClient);
+        var kernel = GetSKChatCompletion(azureAIEndpoint, azureAIAPIKey, azureAIModel, httpClient);
 
         foreach (var diff in fileUnifiedDiffs)
         {
@@ -672,15 +674,15 @@ public class DataService(string org, string pat)
 
             var repoId = repoJsonDoc.RootElement.GetProperty("id").GetString();
 
-            foreach (var thread in threads)
-            {
-                var response = await POST(
-                    $"https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repoId}/pullRequests/{pullRequestId}/threads?api-version=7.1-preview.1",
-                    content: JsonSerializer.Serialize(thread)
-                );
+            //foreach (var thread in threads)
+            //{
+            //    var response = await POST(
+            //        $"https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repoId}/pullRequests/{pullRequestId}/threads?api-version=7.1-preview.1",
+            //        content: JsonSerializer.Serialize(thread)
+            //    );
 
-                Console.WriteLine(response);
-            }
+            //    Console.WriteLine(response);
+            //}
         }
     }
 
@@ -723,13 +725,14 @@ public class DataService(string org, string pat)
     public static Kernel GetSKChatCompletion(
         string azureAIEndpoint,
         string azureOpenAIKey,
+        string azureAIModel,
         HttpClient httpClient
     )
     {
         return Kernel
             .CreateBuilder()
             .AddAzureOpenAIChatCompletion(
-                deploymentName: "gpt-4o",
+                deploymentName: azureAIModel,
                 endpoint: azureAIEndpoint,
                 apiKey: azureOpenAIKey,
                 httpClient: httpClient
