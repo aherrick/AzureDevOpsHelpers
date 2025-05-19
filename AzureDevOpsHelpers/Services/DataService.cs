@@ -1,9 +1,11 @@
 ﻿using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Runtime.Intrinsics.X86;
 using System.Text;
 using System.Text.Json;
 using System.Web;
+using System.Xml.Linq;
 using AzureDevOpsHelpers.Models;
 using DiffPlex.DiffBuilder;
 using DiffPlex.DiffBuilder.Model;
@@ -590,7 +592,7 @@ public class DataService(string org, string pat)
         return pullRequests;
     }
 
-    public static async Task AddAICommentsToPullRequest(
+    public async Task AddAICommentsToPullRequest(
         List<FileUnifiedDiff> fileUnifiedDiffs,
         string azureAIEndpoint,
         string azureAIAPIKey
@@ -611,18 +613,22 @@ public class DataService(string org, string pat)
             var prompt = $$""""
                 You are a senior developer reviewing a pull request. The code changes are provided in unified diff format.
 
-                Only include **constructive criticism** or suggestions for improvement.
-                **Do not include compliments, approvals, or praise** (e.g., "good job", "well done").
-                If a change looks fine, **do not comment on it** at all.
+                Only include constructive criticism or suggestions for improvement.
+                Do not include compliments, approvals, or praise (e.g., "good job", "well done").
+                If a change looks fine, do not comment on it at all.
 
                 Analyze the diff and return your review as a JSON array of threads. Each thread should include:
-                - `threadContext`: with `filePath`, `rightFileStart` and `rightFileEnd` (line and offset)
-                - `comments`: array of helpful review comments with `content`, `parentCommentId: 0`, and `commentType: 1`
-                - `status`: set to "active"
+                - threadContext: with filePath, rightFileStart and rightFileEnd (line and offset)
+                - comments: array of helpful review comments with content, parentCommentId: 0, and commentType: 1
+                - status: set to "active"
 
                 Use the diff to infer the line numbers. Only include comments that are relevant and helpful.
 
-                Only return the JSON array. No extra text.
+                ⚠️ OUTPUT FORMAT INSTRUCTIONS:
+                Return only valid, raw JSON.
+                Do NOT include markdown.
+                Do NOT include code fences (no ```json or similar).
+                Do NOT include any explanations, text, or formatting outside the JSON.
 
                 Example:
                 [

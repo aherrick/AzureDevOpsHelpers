@@ -7,6 +7,8 @@ var ds = new DataService(config["org"], config["pat"]);
 
 //await ds.GetOpenPullRequests("", config["azureAIEndpoint"], config["azureAIAPIKey"]);
 
-var yo = await ds.GetUniffedDiffForPullRequest("Supply Chain Cloud", "SupplyChainCloud", 11768);
+var yo = await ds.GetUniffedDiffForPullRequest("", "", 0);
+
+await ds.AddAICommentsToPullRequest(yo, config["azureAIEndpoint"], config["azureAIAPIKey"]);
 
 ;
