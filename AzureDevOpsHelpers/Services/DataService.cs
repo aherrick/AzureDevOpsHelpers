@@ -674,17 +674,9 @@ public class DataService(string org, string pat)
 
             foreach (var thread in threads)
             {
-                var content = new StringContent(
-                    JsonSerializer.Serialize(thread),
-                    Encoding.UTF8,
-                    "application/json"
-                );
-
-                var bodySerialize = JsonSerializer.Serialize(thread);
-
                 var response = await POST(
                     $"https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repoId}/pullRequests/{pullRequestId}/threads?api-version=7.1-preview.1",
-                    bodySerialize
+                    content: JsonSerializer.Serialize(thread)
                 );
 
                 Console.WriteLine(response);

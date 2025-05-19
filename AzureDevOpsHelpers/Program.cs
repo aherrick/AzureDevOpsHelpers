@@ -9,6 +9,13 @@ var ds = new DataService(config["org"], config["pat"]);
 
 var yo = await ds.GetUniffedDiffForPullRequest("", "", 0);
 
-await ds.AddAICommentsToPullRequest(yo, config["azureAIEndpoint"], config["azureAIAPIKey"]);
+await ds.AddAICommentsToPullRequest(
+    fileUnifiedDiffs: yo,
+    pullRequestId: 0,
+    project: "",
+    repoName: "",
+    config["azureAIEndpoint"],
+    config["azureAIAPIKey"]
+);
 
 ;
