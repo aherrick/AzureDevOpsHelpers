@@ -594,6 +594,9 @@ public class DataService(string org, string pat)
 
     public async Task AddAICommentsToPullRequest(
         List<FileUnifiedDiff> fileUnifiedDiffs,
+        int pullRequestId,
+        string project,
+        string repoName,
         string azureAIEndpoint,
         string azureAIAPIKey
     )
@@ -661,29 +664,31 @@ public class DataService(string org, string pat)
             Console.WriteLine(tester);
             var threads = JsonSerializer.Deserialize<List<JsonElement>>(result.ToString() ?? "[]");
 
-            /*
-             * POST threads to Azure DevOps
-             *
+            var repoJsonDoc = JsonDocument.Parse(
+                await GET(
+                    $"https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repoName}?api-version=7.1-preview.1"
+                )
+            );
+
+            var repoId = repoJsonDoc.RootElement.GetProperty("id").GetString();
+
             foreach (var thread in threads)
             {
-                var content = new StringContent(JsonSerializer.Serialize(thread), Encoding.UTF8, "application/json");
+                var content = new StringContent(
+                    JsonSerializer.Serialize(thread),
+                    Encoding.UTF8,
+                    "application/json"
+                );
 
-                var threadUrl =
-                    $"https://dev.azure.com/{organization}/{project}/_apis/git/repositories/{repoId}/pullRequests/{prId}/threads?api-version=7.1-preview.1";
+                var bodySerialize = JsonSerializer.Serialize(thread);
 
-                var response = await client.PostAsync(threadUrl, content);
-                if (!response.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"Failed to post thread: {response.StatusCode}");
-                    var errorDetails = await response.Content.ReadAsStringAsync();
-                    Console.WriteLine(errorDetails);
-                }
-                else
-                {
-                    Console.WriteLine("Thread posted successfully.");
-                }
+                var response = await POST(
+                    $"https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repoId}/pullRequests/{pullRequestId}/threads?api-version=7.1-preview.1",
+                    bodySerialize
+                );
+
+                Console.WriteLine(response);
             }
-            */
         }
     }
 
