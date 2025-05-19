@@ -1,4 +1,5 @@
 ﻿using System.Net;
+using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -438,45 +439,9 @@ public class DataService(string org, string pat)
             {{ $input }}
             """;
 
-        var retryPolicy = Policy<HttpResponseMessage>
-            .Handle<HttpRequestException>()
-            .OrResult(r => r.StatusCode == HttpStatusCode.TooManyRequests)
-            .WaitAndRetryAsync(
-                retryCount: 5,
-                sleepDurationProvider: (retryAttempt, response, context) =>
-                {
-                    var retryAfter = response?.Result?.Headers?.RetryAfter?.Delta;
-                    if (retryAfter.HasValue)
-                    {
-                        return retryAfter.Value + TimeSpan.FromSeconds(1);
-                    }
+        var httpClient = GetRetryHttpClient();
 
-                    // fallback
-                    var jitter = TimeSpan.FromMilliseconds(Random.Shared.Next(0, 100));
-                    return TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)) + jitter;
-                },
-                onRetryAsync: (outcome, timespan, retryAttempt, context) =>
-                {
-                    Console.WriteLine($"Retry {retryAttempt} for {outcome.Result?.StatusCode}");
-                    return Task.CompletedTask;
-                }
-            );
-
-        var handler = new PolicyHttpMessageHandler(retryPolicy)
-        {
-            InnerHandler = new HttpClientHandler(),
-        };
-        var httpClient = new HttpClient(handler);
-
-        var kernel = Kernel
-            .CreateBuilder()
-            .AddAzureOpenAIChatCompletion(
-                deploymentName: "gpt-4o",
-                endpoint: azureAIEndpoint,
-                apiKey: azureAIAPIKey,
-                httpClient: httpClient
-            )
-            .Build();
+        var kernel = GetSKChatCompletion(azureAIEndpoint, azureAIAPIKey, httpClient);
 
         var pullRequests = new List<PullRequest>();
 
@@ -625,6 +590,150 @@ public class DataService(string org, string pat)
         return pullRequests;
     }
 
+    public static async Task AddAICommentsToPullRequest(
+        List<FileUnifiedDiff> fileUnifiedDiffs,
+        string azureAIEndpoint,
+        string azureAIAPIKey
+    )
+    {
+        var httpClient = GetRetryHttpClient();
+        var kernel = GetSKChatCompletion(azureAIEndpoint, azureAIAPIKey, httpClient);
+
+        foreach (var diff in fileUnifiedDiffs)
+        {
+            Console.WriteLine(diff.UnifiedDiff);
+
+            Console.WriteLine(
+                "---------------------------------------------------------------------------------------"
+            );
+
+            var diffContent = diff.UnifiedDiff.Trim();
+            var prompt = $$""""
+                You are a senior developer reviewing a pull request. The code changes are provided in unified diff format.
+
+                Only include **constructive criticism** or suggestions for improvement.
+                **Do not include compliments, approvals, or praise** (e.g., "good job", "well done").
+                If a change looks fine, **do not comment on it** at all.
+
+                Analyze the diff and return your review as a JSON array of threads. Each thread should include:
+                - `threadContext`: with `filePath`, `rightFileStart` and `rightFileEnd` (line and offset)
+                - `comments`: array of helpful review comments with `content`, `parentCommentId: 0`, and `commentType: 1`
+                - `status`: set to "active"
+
+                Use the diff to infer the line numbers. Only include comments that are relevant and helpful.
+
+                Only return the JSON array. No extra text.
+
+                Example:
+                [
+                  {
+                    "threadContext": {
+                      "filePath": "{{diff.FilePath}}",
+                      "rightFileStart": { "line": 15, "offset": 1 },
+                      "rightFileEnd": { "line": 15, "offset": 1 }
+                    },
+                    "status": "active",
+                    "comments": [
+                      {
+                        "parentCommentId": 0,
+                        "commentType": 1,
+                        "content": "Avoid hardcoded values; use configuration."
+                      }
+                    ]
+                  }
+                ]
+
+                Diff:
+
+                {{diffContent}}
+                """";
+
+            var function = kernel.CreateFunctionFromPrompt(prompt);
+            var result = await kernel.InvokeAsync(function);
+            var tester = result.ToString();
+
+            Console.WriteLine(tester);
+            var threads = JsonSerializer.Deserialize<List<JsonElement>>(result.ToString() ?? "[]");
+
+            /*
+             * POST threads to Azure DevOps
+             *
+            foreach (var thread in threads)
+            {
+                var content = new StringContent(JsonSerializer.Serialize(thread), Encoding.UTF8, "application/json");
+
+                var threadUrl =
+                    $"https://dev.azure.com/{organization}/{project}/_apis/git/repositories/{repoId}/pullRequests/{prId}/threads?api-version=7.1-preview.1";
+
+                var response = await client.PostAsync(threadUrl, content);
+                if (!response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"Failed to post thread: {response.StatusCode}");
+                    var errorDetails = await response.Content.ReadAsStringAsync();
+                    Console.WriteLine(errorDetails);
+                }
+                else
+                {
+                    Console.WriteLine("Thread posted successfully.");
+                }
+            }
+            */
+        }
+    }
+
+    #region Helpers
+
+    private static HttpClient GetRetryHttpClient()
+    {
+        var retryPolicy = Policy<HttpResponseMessage>
+            .Handle<HttpRequestException>()
+            .OrResult(r => r.StatusCode == HttpStatusCode.TooManyRequests)
+            .WaitAndRetryAsync(
+                retryCount: 5,
+                sleepDurationProvider: (retryAttempt, response, context) =>
+                {
+                    var retryAfter = response?.Result?.Headers?.RetryAfter?.Delta;
+                    if (retryAfter.HasValue)
+                    {
+                        return retryAfter.Value + TimeSpan.FromSeconds(1);
+                    }
+
+                    // fallback
+                    var jitter = TimeSpan.FromMilliseconds(Random.Shared.Next(0, 100));
+                    return TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)) + jitter;
+                },
+                onRetryAsync: (outcome, timespan, retryAttempt, context) =>
+                {
+                    Console.WriteLine($"Retry {retryAttempt} for {outcome.Result?.StatusCode}");
+                    return Task.CompletedTask;
+                }
+            );
+
+        var handler = new PolicyHttpMessageHandler(retryPolicy)
+        {
+            InnerHandler = new HttpClientHandler(),
+        };
+
+        return new HttpClient(handler);
+    }
+
+    public static Kernel GetSKChatCompletion(
+        string azureAIEndpoint,
+        string azureOpenAIKey,
+        HttpClient httpClient
+    )
+    {
+        return Kernel
+            .CreateBuilder()
+            .AddAzureOpenAIChatCompletion(
+                deploymentName: "gpt-4o",
+                endpoint: azureAIEndpoint,
+                apiKey: azureOpenAIKey,
+                httpClient: httpClient
+            )
+            .Build();
+    }
+
     private async Task<string> GET(string url)
     {
         return await MakeApiCall(url, HttpMethod.Get, null);
@@ -667,4 +776,6 @@ public class DataService(string org, string pat)
 
         return await response.Content.ReadAsStringAsync();
     }
+
+    #endregion Helpers
 }
