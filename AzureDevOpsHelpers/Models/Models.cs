@@ -23,3 +23,11 @@ public class PullRequest
     public string RepositoryName { get; set; }
     public List<string> ApprovedReviewers { get; set; }
 }
+
+public class AzureDevOpsComment
+{
+    public string Comment { get; set; }
+    public string FilePath { get; set; }
+    public int StartLine { get; set; }
+    public int EndLine { get; set; }
+}

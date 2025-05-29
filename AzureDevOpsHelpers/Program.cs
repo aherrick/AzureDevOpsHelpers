@@ -7,20 +7,20 @@ var ds = new DataService(config["org"], config["pat"]);
 
 //await ds.GetOpenPullRequests("", config["azureAIEndpoint"], config["azureAIAPIKey"]);
 
-var yo = await ds.GetUniffedDiffForPullRequest(
-    project: "Supply Chain Cloud",
-    repoName: "SupplyChainCloud",
-    11768
-);
+var prId = 12242;
+var project = "Supply Chain Cloud";
 
-await ds.AddAICommentsToPullRequest(
-    fileUnifiedDiffs: yo,
-    pullRequestId: 11768,
-    project: "Supply Chain Cloud",
-    repoName: "SupplyChainCloud",
-    config["azureAIEndpoint"],
-    config["azureAIAPIKey"],
-    config["azureAIModel"]
-);
+var yo = await ds.GetComments(project, prId);
+
+//var yo = await ds.GetUniffedDiffForPullRequest(project: project, prId);
+
+//await ds.AddAICommentsToPullRequest(
+//    fileUnifiedDiffs: yo,
+//    pullRequestId: prId,
+//    project: project,
+//    config["azureAIEndpoint"],
+//    config["azureAIAPIKey"],
+//    config["azureAIModel"]
+//);
 
 ;

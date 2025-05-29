@@ -1,4 +1,5 @@
-﻿using System.Net;
+﻿using System.Collections.Generic;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Runtime.Intrinsics.X86;
@@ -12,6 +13,8 @@ using DiffPlex.DiffBuilder.Model;
 using Microsoft.Extensions.Http;
 using Microsoft.SemanticKernel;
 using Polly;
+using Polly.Caching;
+using static Azure.Core.HttpHeader;
 
 namespace AzureDevOpsHelpers.Services;
 
@@ -122,25 +125,16 @@ public class DataService(string org, string pat)
         return projects;
     }
 
-    private async Task<PullRequestDto> GetPullRequestChanges(
-        string project,
-        string repoName,
-        int pullRequestId
-    )
+    private async Task<PullRequestDto> GetPullRequestChanges(string project, int pullRequestId)
     {
-        var repoJsonDoc = JsonDocument.Parse(
-            await GET(
-                $"https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repoName}?api-version=7.1-preview.1"
-            )
-        );
-
-        var repoId = repoJsonDoc.RootElement.GetProperty("id").GetString();
-
         var prJsonDoc = JsonDocument.Parse(
             await GET(
-                $"https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repoId}/pullRequests/{pullRequestId}?api-version=7.1"
+                $"https://dev.azure.com/{org}/{project}/_apis/git/pullrequests/{pullRequestId}?api-version=7.1"
             )
         );
+
+        // Extract the repository ID
+        var repoId = prJsonDoc.RootElement.GetProperty("repository").GetProperty("id").GetString();
 
         var baseCommitId = prJsonDoc
             .RootElement.GetProperty("lastMergeTargetCommit")
@@ -166,9 +160,9 @@ public class DataService(string org, string pat)
         );
     }
 
-    public async Task GetDiffForPullRequest(string project, string repoName, int pullRequestId)
+    public async Task GetDiffForPullRequest(string project, int pullRequestId)
     {
-        var prDto = await GetPullRequestChanges(project, repoName, pullRequestId);
+        var prDto = await GetPullRequestChanges(project, pullRequestId);
         StringBuilder diffBuilder = new();
 
         foreach (var change in prDto.Changes)
@@ -327,13 +321,12 @@ public class DataService(string org, string pat)
 
     public async Task<List<FileUnifiedDiff>> GetUniffedDiffForPullRequest(
         string project,
-        string repoName,
         int pullRequestId
     )
     {
-        var filleUnifiedDiffDtos = new List<FileUnifiedDiff>();
+        var fileUnifiedDiffDtos = new List<FileUnifiedDiff>();
 
-        var prDto = await GetPullRequestChanges(project, repoName, pullRequestId);
+        var prDto = await GetPullRequestChanges(project, pullRequestId);
 
         foreach (var change in prDto.Changes)
         {
@@ -350,10 +343,14 @@ public class DataService(string org, string pat)
                     $"https://dev.azure.com/{org}/{project}/_apis/git/repositories/{prDto.RepositoryId}/items?path={Uri.EscapeDataString(filePath)}&versionDescriptor.version={prDto.BaseCommitId}&versionDescriptor.versionType=commit&api-version=7.1"
                 );
 
+                oldText ??= string.Empty;
+
+                // Fetch newText (target commit), assuming it always exists
                 var newText = await GET(
                     $"https://dev.azure.com/{org}/{project}/_apis/git/repositories/{prDto.RepositoryId}/items?path={Uri.EscapeDataString(filePath)}&versionDescriptor.version={prDto.TargetCommitId}&versionDescriptor.versionType=commit&api-version=7.1"
                 );
 
+                // Generate diff between oldText and newText
                 var diff = InlineDiffBuilder.Diff(oldText, newText);
 
                 int oldLine = 1;
@@ -397,11 +394,11 @@ public class DataService(string org, string pat)
                     }
                 }
 
-                filleUnifiedDiffDtos.Add(new FileUnifiedDiff(filePath, fileDiffBuilder.ToString()));
+                fileUnifiedDiffDtos.Add(new FileUnifiedDiff(filePath, fileDiffBuilder.ToString()));
             }
         }
 
-        return filleUnifiedDiffDtos;
+        return fileUnifiedDiffDtos;
     }
 
     public async Task<List<PullRequest>> GetOpenPullRequests(
@@ -597,66 +594,108 @@ public class DataService(string org, string pat)
         List<FileUnifiedDiff> fileUnifiedDiffs,
         int pullRequestId,
         string project,
-        string repoName,
         string azureAIEndpoint,
         string azureAIAPIKey,
         string azureAIModel
     )
     {
+        var repoId = JsonDocument
+            .Parse(
+                await GET(
+                    $"https://dev.azure.com/{org}/{project}/_apis/git/pullrequests/{pullRequestId}?api-version=7.1"
+                )
+            )
+            .RootElement.GetProperty("repository")
+            .GetProperty("id")
+            .GetString();
+
         var httpClient = GetRetryHttpClient();
         var kernel = GetSKChatCompletion(azureAIEndpoint, azureAIAPIKey, azureAIModel, httpClient);
 
+        // Step 1: Get latest iteration (assumes 1 for simplicity or fetch dynamically if needed)
+        //var iterationsResponse = await GET(
+        //    $"https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repoId}/pullRequests/{pullRequestId}/iterations?api-version=6.0"
+        //);
+        //var iterations = JsonDocument.Parse(iterationsResponse).RootElement.GetProperty("value");
+        //var latestIterationId = iterations
+        //    .EnumerateArray()
+        //    .Max(x => x.GetProperty("id").GetInt32());
+
+        var changesResponse = await GET(
+            $"https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repoId}/pullRequests/{pullRequestId}/iterations/1/changes?api-version=6.0"
+        );
+
+        var changes = JsonDocument.Parse(changesResponse).RootElement.GetProperty("changeEntries");
+
         foreach (var diff in fileUnifiedDiffs)
         {
-            Console.WriteLine(diff.UnifiedDiff);
+            int? changeTrackingId = changes
+                .EnumerateArray()
+                .Where(c =>
+                    c.GetProperty("item").GetProperty("path").GetString() == diff.FilePath // don't trim if diff.FilePath has a leading slash
+                )
+                .Select(c => (int?)c.GetProperty("changeTrackingId").GetInt32())
+                .FirstOrDefault();
 
-            Console.WriteLine(
-                "---------------------------------------------------------------------------------------"
-            );
+            //if (changeTrackingId == null)
+            //{
+            //    continue; // Skip this file if no valid changeTrackingId found
+            //}
 
             var diffContent = diff.UnifiedDiff.Trim();
             var prompt = $$""""
-                You are a senior developer reviewing a pull request. The code changes are provided in unified diff format.
+                    You are a senior developer reviewing a pull request. The code changes are provided in unified diff format.
 
-                Only include constructive criticism or suggestions for improvement.
-                Do not include compliments, approvals, or praise (e.g., "good job", "well done").
-                If a change looks fine, do not comment on it at all.
+                    Only include constructive criticism or suggestions for improvement.
+                    Do not include compliments, approvals, or praise (e.g., "good job", "well done").
+                    If a change looks fine, do not comment on it at all.
 
-                Analyze the diff and return your review as a JSON array of threads. Each thread should include:
-                - threadContext: with filePath, rightFileStart and rightFileEnd (line and offset)
-                - comments: array of helpful review comments with content, parentCommentId: 0, and commentType: 1
-                - status: set to "active"
+                    Analyze the diff and return your review as a JSON array of threads. Each thread should include:
+                    - threadContext: with filePath, rightFileStart and rightFileEnd (line and offset)
+                    - comments: array of helpful review comments with:
+                        - content prefixed by "AI Review: "
+                        - parentCommentId: 0
+                        - commentType: 1
+                    - status: set to "active"
 
-                Use the diff to infer the line numbers. Only include comments that are relevant and helpful.
+                    Use the diff to infer the line numbers. Only include comments that are relevant and helpful.
 
-                ⚠️ OUTPUT FORMAT INSTRUCTIONS:
-                Return only valid, raw JSON.
-                Do NOT include markdown.
-                Do NOT include code fences (no ```json or similar).
-                Do NOT include any explanations, text, or formatting outside the JSON.
+                    ⚠️ OUTPUT FORMAT INSTRUCTIONS:
+                    Return only valid, raw JSON.
+                    Do NOT include markdown.
+                    Do NOT include code fences (no ```json or similar).
+                    Do NOT include any explanations, text, or formatting outside the JSON.
 
-                Example:
-                [
-                  {
-                    "threadContext": {
-                      "filePath": "{{diff.FilePath}}",
-                      "rightFileStart": { "line": 15, "offset": 1 },
-                      "rightFileEnd": { "line": 15, "offset": 1 }
-                    },
-                    "status": "active",
-                    "comments": [
+                    Example:
+                    [
                       {
-                        "parentCommentId": 0,
-                        "commentType": 1,
-                        "content": "Avoid hardcoded values; use configuration."
+                        "threadContext": {
+                          "filePath": "{{diff.FilePath}}",
+                          "rightFileStart": { "line": 15, "offset": 1 },
+                          "rightFileEnd": { "line": 15, "offset": 1 }
+                        },
+                        "status": "active",
+                        "comments": [
+                          {
+                            "parentCommentId": 0,
+                            "commentType": 1,
+                            "content": "AI Review: Avoid hardcoded values; use configuration."
+                          }
+                        ],
+                        "pullRequestThreadContext": {
+                                "changeTrackingId": {{changeTrackingId}},
+                                "iterationContext": {
+                                "firstComparingIteration": 1,
+                                "secondComparingIteration": 1
+                                }
+                            }
+                        }
                       }
                     ]
-                  }
-                ]
 
-                Diff:
+                    Diff:
 
-                {{diffContent}}
+                    {{diffContent}}
                 """";
 
             var function = kernel.CreateFunctionFromPrompt(prompt);
@@ -666,24 +705,72 @@ public class DataService(string org, string pat)
             Console.WriteLine(tester);
             var threads = JsonSerializer.Deserialize<List<JsonElement>>(result.ToString() ?? "[]");
 
-            var repoJsonDoc = JsonDocument.Parse(
-                await GET(
-                    $"https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repoName}?api-version=7.1-preview.1"
-                )
-            );
+            foreach (var thread in threads)
+            {
+                var response = await POST(
+                    $"https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repoId}/pullRequests/{pullRequestId}/threads?api-version=7.1-preview.1",
+                    content: JsonSerializer.Serialize(thread)
+                );
 
-            var repoId = repoJsonDoc.RootElement.GetProperty("id").GetString();
-
-            //foreach (var thread in threads)
-            //{
-            //    var response = await POST(
-            //        $"https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repoId}/pullRequests/{pullRequestId}/threads?api-version=7.1-preview.1",
-            //        content: JsonSerializer.Serialize(thread)
-            //    );
-
-            //    Console.WriteLine(response);
-            //}
+                Console.WriteLine(response);
+            }
         }
+    }
+
+    public async Task<List<AzureDevOpsComment>> GetComments(string project, int pullRequestId)
+    {
+        var repoId = JsonDocument
+            .Parse(
+                await GET(
+                    $"https://dev.azure.com/{org}/{project}/_apis/git/pullrequests/{pullRequestId}?api-version=7.1"
+                )
+            )
+            .RootElement.GetProperty("repository")
+            .GetProperty("id")
+            .GetString();
+
+        var json = await GET(
+            $"https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repoId}/pullRequests/{pullRequestId}/threads?api-version=7.1-preview.1"
+        );
+        var doc = JsonDocument.Parse(json);
+
+        var result = new List<AzureDevOpsComment>();
+
+        foreach (var thread in doc.RootElement.GetProperty("value").EnumerateArray())
+        {
+            if (
+                thread.GetProperty("threadContext") is { ValueKind: JsonValueKind.Object } context
+                && context.TryGetProperty("filePath", out var filePathProp)
+                && context.TryGetProperty("rightFileStart", out var rightStart)
+                && rightStart.TryGetProperty("line", out var startLineProp)
+                && context.TryGetProperty("rightFileEnd", out var rightEnd)
+                && rightEnd.TryGetProperty("line", out var endLineProp)
+                && thread.TryGetProperty("comments", out var comments)
+            )
+            {
+                string filePath = filePathProp.GetString();
+                int startLine = startLineProp.GetInt32();
+                int endLine = endLineProp.GetInt32();
+
+                foreach (var comment in comments.EnumerateArray())
+                {
+                    if (comment.GetProperty("commentType").GetString() != "system")
+                    {
+                        result.Add(
+                            new AzureDevOpsComment
+                            {
+                                Comment = comment.GetProperty("content").GetString() ?? "",
+                                FilePath = filePath,
+                                StartLine = startLine,
+                                EndLine = endLine,
+                            }
+                        );
+                    }
+                }
+            }
+        }
+
+        return result;
     }
 
     #region Helpers
