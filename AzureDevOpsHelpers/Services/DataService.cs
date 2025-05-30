@@ -599,15 +599,7 @@ public class DataService(string org, string pat)
         string azureAIModel
     )
     {
-        var repoId = JsonDocument
-            .Parse(
-                await GET(
-                    $"https://dev.azure.com/{org}/{project}/_apis/git/pullrequests/{pullRequestId}?api-version=7.1"
-                )
-            )
-            .RootElement.GetProperty("repository")
-            .GetProperty("id")
-            .GetString();
+        var repoId = await GetRepoIdFromPullRequest(project, pullRequestId);
 
         var httpClient = GetRetryHttpClient();
         var kernel = GetSKChatCompletion(azureAIEndpoint, azureAIAPIKey, azureAIModel, httpClient);
@@ -719,15 +711,7 @@ public class DataService(string org, string pat)
 
     public async Task<List<AzureDevOpsComment>> GetComments(string project, int pullRequestId)
     {
-        var repoId = JsonDocument
-            .Parse(
-                await GET(
-                    $"https://dev.azure.com/{org}/{project}/_apis/git/pullrequests/{pullRequestId}?api-version=7.1"
-                )
-            )
-            .RootElement.GetProperty("repository")
-            .GetProperty("id")
-            .GetString();
+        var repoId = await GetRepoIdFromPullRequest(project, pullRequestId);
 
         var json = await GET(
             $"https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repoId}/pullRequests/{pullRequestId}/threads?api-version=7.1-preview.1"
@@ -771,6 +755,19 @@ public class DataService(string org, string pat)
         }
 
         return result;
+    }
+
+    private async Task<string> GetRepoIdFromPullRequest(string project, int pullRequestId)
+    {
+        return JsonDocument
+            .Parse(
+                await GET(
+                    $"https://dev.azure.com/{org}/{project}/_apis/git/pullrequests/{pullRequestId}?api-version=7.1"
+                )
+            )
+            .RootElement.GetProperty("repository")
+            .GetProperty("id")
+            .GetString();
     }
 
     #region Helpers
